@@ -3,11 +3,19 @@ import os, traceback
 from flask import Flask, request, jsonify
 import ccxt
 from dotenv import load_dotenv
+import logging
 
-# Lokal test için .env dosyası; Render’da ortam değişkenleri GUI’den girilecek
+# .env okumayı lokal test için
 load_dotenv()
-app = Flask(__name__)
 
+# Logging yapılandırma
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# Ortam değişkenleri
 API_KEY = os.getenv("MEXC_API_KEY")
 API_SECRET = os.getenv("MEXC_API_SECRET")
 USE_TESTNET = os.getenv("USE_TESTNET", "False").lower() in ("true","1","yes")
@@ -21,6 +29,7 @@ except:
     DEFAULT_LEVERAGE = 25
 
 if not API_KEY or not API_SECRET:
+    logger.error("MEXC_API_KEY veya MEXC_API_SECRET tanımlı değil.")
     raise RuntimeError("MEXC_API_KEY veya MEXC_API_SECRET tanımlı değil.")
 
 # CCXT exchange oluşturma
@@ -29,38 +38,56 @@ if USE_TESTNET:
     exchange = ccxt.mexc(exchange_config)
     try:
         exchange.set_sandbox_mode(True)
-    except Exception:
-        pass
+        logger.info("MEXC testnet modu etkin.")
+    except Exception as e:
+        logger.warning(f"Testnet modu ayarlanamadı: {e}")
 else:
     exchange = ccxt.mexc(exchange_config)
+    logger.info("MEXC gerçek modda çalışacak.")
 
 try:
     exchange.load_markets()
-except Exception:
-    pass
+    logger.info(f"CCXT markets yüklendi, sembol sayısı: {len(exchange.symbols)}")
+except Exception as e:
+    logger.error(f"load_markets hatası: {e}")
+
+app = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         data = request.get_json(force=True)
+        logger.info(f"[WEBHOOK] Alındı: {data}")
+
+        # Gerekli alanlar
         coin = data.get('symbol')
         side = data.get('side')
         entry_price = data.get('entry_price')
         if not all([coin, side, entry_price]):
-            return jsonify({'error': 'Eksik veri'}), 400
+            msg = "Eksik veri: symbol, side veya entry_price yok"
+            logger.warning(msg + f" | data: {data}")
+            return jsonify({'error': msg}), 400
         try:
             entry_price = float(entry_price)
         except:
-            return jsonify({'error': 'Invalid entry_price'}), 400
+            msg = "Invalid entry_price format"
+            logger.warning(msg + f" | entry_price: {entry_price}")
+            return jsonify({'error': msg}), 400
 
-        # Symbol parse
-        symbol = coin.upper()
+        # Suffix temizle: örn "ETHUSDT.P" -> "ETHUSDT"
+        coin_raw = coin.upper()
+        if '.' in coin_raw:
+            coin_raw = coin_raw.split('.')[0]
+        # Symbol parse: "ETHUSDT" -> "ETH/USDT"
+        symbol = coin_raw
         if '/' not in symbol:
             if symbol.endswith("USDT"):
                 base = symbol[:-4]; quote = "USDT"
                 symbol = base + "/" + quote
             else:
-                return jsonify({'error': 'Symbol formatı anlaşılmadı'}), 400
+                msg = f"Symbol formatı anlaşılmadı: {coin}"
+                logger.warning(msg)
+                return jsonify({'error': msg}), 400
 
         # CCXT unified symbol arama
         unified_symbol = None
@@ -70,7 +97,10 @@ def webhook():
             if ":" in m and m.split(":")[0] == symbol:
                 unified_symbol = m; break
         if unified_symbol is None:
-            return jsonify({'error': f"Sembol bulunamadı: {symbol}"}), 400
+            msg = f"Sembol bulunamadı: {symbol}"
+            logger.warning(msg)
+            return jsonify({'error': msg}), 400
+        logger.info(f"Parsed symbol: {symbol} -> unified: {unified_symbol}")
 
         # Bakiye çekme
         try:
@@ -84,17 +114,23 @@ def webhook():
             elif 'total' in balance and 'USDT' in balance['total']:
                 usdt_bal = float(balance['total']['USDT'])
             else:
-                return jsonify({'error': 'USDT bakiyesi alınamadı'}), 500
+                raise Exception("USDT bakiyesi bulunamadı")
         except Exception as e:
-            return jsonify({'error': f'Bakiye alınamadı: {e}'}), 500
+            msg = f"Bakiye alınamadı: {e}"
+            logger.error(msg)
+            return jsonify({'error': msg}), 500
+        logger.info(f"USDT bakiyesi: {usdt_bal}")
         if usdt_bal <= 0:
-            return jsonify({'error': 'Yetersiz bakiye'}), 400
+            msg = "Yetersiz bakiye"
+            logger.warning(msg)
+            return jsonify({'error': msg}), 400
 
         # Leverage ayarı
         try:
             exchange.set_leverage(DEFAULT_LEVERAGE, unified_symbol)
-        except Exception:
-            pass
+            logger.info(f"Leverage ayarlandı: {DEFAULT_LEVERAGE}x for {unified_symbol}")
+        except Exception as e:
+            logger.warning(f"Leverage ayarlanamadı: {e}")
 
         # Miktar hesaplama ve precision
         qty = (usdt_bal * RISK_RATIO * DEFAULT_LEVERAGE) / entry_price
@@ -104,16 +140,22 @@ def webhook():
         except Exception:
             qty = round(qty, 3)
         if float(qty) <= 0:
-            return jsonify({'error': 'Qty sıfır veya negatif'}), 400
+            msg = "Qty sıfır veya negatif"
+            logger.warning(msg)
+            return jsonify({'error': msg}), 400
+        logger.info(f"Pozisyon miktarı (qty): {qty}")
 
         is_long = side.strip().lower() == 'long'
         order_side = 'buy' if is_long else 'sell'
 
-        # Market order ile pozisyon açma
+        # Pozisyon açma (market)
         try:
             open_order = exchange.create_order(unified_symbol, 'market', order_side, qty, None, {'leverage': DEFAULT_LEVERAGE})
+            logger.info(f"Pozisyon açıldı: {open_order}")
         except Exception as e:
-            return jsonify({'error': f'Pozisyon açma hatası: {e}'}), 500
+            msg = f"Pozisyon açma hatası: {e}"
+            logger.error(msg)
+            return jsonify({'error': msg}), 500
 
         # TP fiyatı %0.4
         tp_price = entry_price * (1.004 if is_long else 0.996)
@@ -121,11 +163,15 @@ def webhook():
             tp_price = exchange.price_to_precision(unified_symbol, tp_price)
         except:
             tp_price = round(tp_price, 2)
+        logger.info(f"TP fiyatı belirlendi: {tp_price}")
 
         # TP emri (reduceOnly)
         try:
             tp_order = exchange.create_order(unified_symbol, 'limit', 'sell' if is_long else 'buy', qty, tp_price, {'reduceOnly': True})
-        except Exception:
+            logger.info(f"TP order kondu: {tp_order}")
+        except Exception as e:
+            logger.error(f"TP emri hatası: {e}")
+            # TP hatasında bile success dönebiliriz ya da bilgi verebiliriz
             tp_order = None
 
         return jsonify({
@@ -139,8 +185,15 @@ def webhook():
         }), 200
 
     except Exception as e:
-        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
+        trace = traceback.format_exc()
+        logger.exception("Webhook işlenirken beklenmedik hata")
+        return jsonify({'error': str(e), 'trace': trace}), 500
+
+@app.route('/health', methods=['GET'])
+def health():
+    return "OK", 200
 
 if __name__ == '__main__':
+    logger.info("Sunucu başlatılıyor")
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
