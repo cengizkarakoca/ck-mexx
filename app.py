@@ -5,10 +5,10 @@ import ccxt
 from dotenv import load_dotenv
 import logging
 
-# .env okumayı lokal test için
+# .env okunması (yerelde test için)
 load_dotenv()
 
-# Logging yapılandırma
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -32,7 +32,7 @@ if not API_KEY or not API_SECRET:
     logger.error("MEXC_API_KEY veya MEXC_API_SECRET tanımlı değil.")
     raise RuntimeError("MEXC_API_KEY veya MEXC_API_SECRET tanımlı değil.")
 
-# CCXT exchange oluşturma
+# CCXT exchange
 exchange_config = {'apiKey': API_KEY, 'secret': API_SECRET, 'enableRateLimit': True}
 exchange = ccxt.mexc(exchange_config)
 if USE_TESTNET:
@@ -44,7 +44,7 @@ if USE_TESTNET:
 else:
     logger.info("MEXC gerçek modda çalışacak.")
 
-# Markets ve özellikleri logla
+# Markets yükle ve logla
 try:
     exchange.load_markets()
     logger.info(f"CCXT markets yüklendi, sembol sayısı: {len(exchange.symbols)}")
@@ -75,13 +75,13 @@ def webhook():
             logger.warning(msg + f" | entry_price: {entry_price}")
             return jsonify({'error': msg}), 400
 
-        # Suffix temizle (örn ".P", ".PERP" varsa)
+        # Suffix temizle
         coin_raw = coin.upper()
         if '.' in coin_raw:
             coin_raw = coin_raw.split('.')[0]
         logger.info(f"Suffix temizlendikten sonra coin_raw: {coin_raw}")
 
-        # Symbol parse: "ETHUSDT" -> "ETH/USDT"
+        # Symbol parse: ETHUSDT -> ETH/USDT
         symbol = coin_raw
         if '/' not in symbol:
             if symbol.endswith("USDT"):
@@ -93,16 +93,17 @@ def webhook():
                 return jsonify({'error': msg}), 400
         logger.info(f"Parsed symbol string: {symbol}")
 
-        # Unified symbol ve market_id bulma: önce swap (perpetual), yoksa spot
         base, quote = symbol.split('/')
         unified_symbol = None
         market_id = None
+        # Önce swap (perpetual)
         for m, market in exchange.markets.items():
             if market.get('type') == 'swap' and market.get('base') == base and market.get('quote') == quote:
                 unified_symbol = m
                 market_id = market.get('id')
                 logger.info(f"Found swap market: unified_symbol={m}, market_id={market_id}")
                 break
+        # Fallback spot
         if unified_symbol is None:
             for m, market in exchange.markets.items():
                 if market.get('type') == 'spot' and market.get('base') == base and market.get('quote') == quote:
@@ -126,6 +127,7 @@ def webhook():
                 balance = exchange.fetch_balance()
                 logger.info("fetch_balance fallback kullanıldı.")
             logger.info(f"Balance raw: {balance}")
+            # Önce free/total içinden:
             if 'free' in balance and 'USDT' in balance['free']:
                 usdt_bal = float(balance['free']['USDT'])
             elif 'total' in balance and 'USDT' in balance['total']:
@@ -160,7 +162,7 @@ def webhook():
 
         # Pozisyon tarafı
         is_long = side.strip().lower() == 'long'
-        # Leverage ayarı MEXC (openType, positionType parametreleri ile)
+        # Leverage ayarı
         try:
             params = {'openType': 1, 'positionType': 1 if is_long else 2}
             exchange.set_leverage(DEFAULT_LEVERAGE, unified_symbol, params)
@@ -168,7 +170,7 @@ def webhook():
         except Exception as e:
             logger.warning(f"Leverage ayarlanamadı: {e}")
 
-        # Miktar hesaplama
+        # Miktar hesapla
         qty = (usdt_bal * RISK_RATIO * DEFAULT_LEVERAGE) / entry_price
         try:
             qty = exchange.amount_to_precision(unified_symbol, qty)
@@ -181,17 +183,39 @@ def webhook():
             return jsonify({'error': msg}), 400
         logger.info(f"Pozisyon miktarı (qty): {qty}")
 
-        # Pozisyon açma (market) — mutlaka market_id kullanılıyor
+        # Pozisyon açma: farklı sembol formatlarını deneyen fallback
         order_side = 'buy' if is_long else 'sell'
-        try:
-            open_order = exchange.create_order(market_id, 'market', order_side, qty, None, {'leverage': DEFAULT_LEVERAGE})
-            logger.info(f"Pozisyon açıldı (market_id kullanılarak): {open_order}")
-        except Exception as e:
-            msg = f"Pozisyon açma hatası: {e}"
+        open_order = None
+        order_errors = []
+        # Alternatif semboller: market_id (örn "ETH_USDT"), birleşik ("ETHUSDT"), unified_symbol (örn "ETH/USDT:USDT")
+        alt_symbols = []
+        if market_id:
+            alt_symbols.append(market_id)
+        # birleşik format: base+quote
+        alt_symbols.append(base + quote)
+        # bazen alt tire yerine boşluk veya farklı? ama deneyelim
+        alt_symbols.append(base + "_" + quote)
+        # unified
+        alt_symbols.append(unified_symbol)
+        # uniq liste
+        seen = set()
+        alt_symbols = [s for s in alt_symbols if s and not (s in seen or seen.add(s))]
+        for sym in alt_symbols:
+            try:
+                logger.info(f"Pozisyon açma denemesi sembol ile: {sym}")
+                open_order = exchange.create_order(sym, 'market', order_side, qty, None, {'leverage': DEFAULT_LEVERAGE})
+                logger.info(f"Pozisyon açıldı with symbol {sym}: {open_order}")
+                break
+            except Exception as e:
+                error_msg = str(e)
+                order_errors.append((sym, error_msg))
+                logger.warning(f"Pozisyon açma denemesi başarısız symbol={sym}: {error_msg}")
+        if open_order is None:
+            msg = f"Pozisyon açma hatası, denenen semboller ve hatalar: {order_errors}"
             logger.error(msg)
             return jsonify({'error': msg}), 500
 
-        # TP işlemi
+        # TP işlemi: yine fallback sembollerle
         tp_price = entry_price * (1.004 if is_long else 0.996)
         try:
             tp_price = exchange.price_to_precision(unified_symbol, tp_price)
@@ -199,12 +223,22 @@ def webhook():
             tp_price = round(tp_price, 2)
         logger.info(f"TP fiyatı belirlendi: {tp_price}")
 
-        try:
-            tp_order = exchange.create_order(market_id, 'limit', 'sell' if is_long else 'buy', qty, tp_price, {'reduceOnly': True})
-            logger.info(f"TP order kondu: {tp_order}")
-        except Exception as e:
-            logger.error(f"TP emri hatası: {e}")
-            tp_order = None
+        tp_order = None
+        tp_errors = []
+        for sym in alt_symbols:
+            try:
+                logger.info(f"TP emri denemesi sembol ile: {sym}")
+                tp_order = exchange.create_order(sym, 'limit', 'sell' if is_long else 'buy', qty, tp_price, {'reduceOnly': True})
+                logger.info(f"TP order kondu with symbol {sym}: {tp_order}")
+                break
+            except Exception as e:
+                err = str(e)
+                tp_errors.append((sym, err))
+                logger.warning(f"TP emri denemesi başarısız symbol={sym}: {err}")
+        if tp_order is None:
+            logger.error(f"TP order konulamadı, denenen semboller ve hatalar: {tp_errors}")
+            # TP emri başarısız olsa bile açılan pozisyon var; isterseniz burayı hata döndürmek yerine bilgi döndürün.
+            # return jsonify({'error': 'TP emri konulamadı'}), 500
 
         return jsonify({
             'status': 'success',
