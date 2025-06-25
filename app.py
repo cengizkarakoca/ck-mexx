@@ -222,10 +222,13 @@ def mexc_webhook():
         # quantity: Base currency miktarı (örn: XRP miktarı)
         quantity = (usdt_balance * DEFAULT_LEVERAGE) / current_price
         
-        # Eğer miktar çok küçükse, yuvarlama sorunları veya minimum emir büyüklüğü nedeniyle hata alabiliriz.
-        # MEXC'nin minimum emir büyüklüğüne dikkat etmek gerekir.
-        # Şimdilik, ondalıklı basamağı koruyarak gönderelim.
-        # Örneğin, XRP için 6 ondalık basamak yeterli olabilir.
+        # MEXC'nin XRPUSDT için minimum emir büyüklüğünü kontrol edin. Genellikle 1 XRP veya daha fazla olabilir.
+        MIN_ORDER_QUANTITY_XRP = 1.0 # Bu değeri MEXC dokümantasyonundan veya pratik testlerle doğrulayın!
+        
+        if quantity < MIN_ORDER_QUANTITY_XRP:
+            logger.warning(f"[MİKTAR HESAPLAMA] Hesaplanan işlem miktarı ({quantity} {symbol}) minimum emir miktarından ({MIN_ORDER_QUANTITY_XRP} {symbol}) küçük. İşlem iptal edildi.")
+            return jsonify({"status": "failed", "message": f"Hesaplanan işlem miktarı çok küçük (Min: {MIN_ORDER_QUANTITY_XRP} {symbol})"}), 400
+            
         quantity = float(f"{quantity:.6f}") # Örn: 6 ondalık basamağa yuvarla
 
         if quantity <= 0:
