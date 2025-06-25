@@ -1,6 +1,4 @@
 flask
-ccxt
 python-dotenv
-gunicorn
 requests
-hashlib, hmac, time, uuid
+ccxt
