@@ -124,9 +124,66 @@ def balance():
         logger.error(f"[BALANCE] Hata: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/webhook", methods=["POST"])
+def mexc_webhook():
+    try:
+        data = request.get_json()
+        logger.info(f"[WEBHOOK] Gelen veri: {data}")
+
+        symbol = data.get("symbol")
+        side = data.get("side")
+        entry_price = data.get("entry_price")
+
+        if not symbol or not side:
+            return jsonify({"error": "Eksik parametreler: symbol veya side"}), 400
+
+        # Miktar hesaplamasını kendi stratejinize göre ayarlayın.
+        # Örneğin, 10 USDT değerinde bir işlem için:
+        # Not: MEXC'de semboller genelde USDT ile bitiyor (örn: BTCUSDT).
+        # TradingView'den sadece "BTC" gelirse, "USDT" eklemeniz gerekebilir.
+        trade_symbol = symbol + "USDT" # Assuming the symbol from TradingView is e.g., "XRP"
+        
+        # Basit bir örnek: Sabit 10 USDT'lik işlem değeri.
+        # Bunu kendi risk yönetiminize göre değiştirin.
+        # Örneğin, bakiyenizin %x'i kadar işlem yapmak için balance endpoint'ini kullanabilirsiniz.
+        trade_amount_usd = 10 # İşlem yapılacak USDT miktarı
+
+        # Eğer piyasa emri verilecekse (price=None), miktarı USD değeri üzerinden hesaplamak gerekir.
+        # quantity = trade_amount_usd / current_price_of_symbol (ancak current_price_of_symbol'u çekmeniz gerekir)
+        # Şimdilik, entry_price'ı kullanarak bir tahmin yapalım, ancak piyasa emrinde bu çok kritik değil.
+        
+        # Piyasa emri (order_type=5) veriyorsak, quantity olarak doğrudan almak istediğimiz coin miktarını vermemiz gerekir.
+        # Eğer trade_amount_usd kadar işlem yapmak istiyorsak, o anki piyasa fiyatını çekmeliyiz.
+        # Bu basitlik adına, quantity'i sabit bir sayı olarak ya da entry_price üzerinden yaklaşık hesaplayalım.
+        
+        # Daha güvenli bir miktar hesaplaması için, ccxt ile güncel fiyatı çekebilirsiniz:
+        # exchange = ccxt.mexc(...)
+        # if USE_TESTNET: exchange.set_sandbox_mode(True)
+        # ticker = exchange.fetch_ticker(trade_symbol)
+        # current_price = ticker['last']
+        # quantity = trade_amount_usd / current_price
+        
+        # Geçici olarak, 10 USDT'lik bir işlem için fiyatı 0.50 olarak varsayarak bir miktar atayalım.
+        # Burası kendi miktar yönetimi stratejinize göre ayarlanmalıdır.
+        quantity = trade_amount_usd / float(entry_price) if entry_price and float(entry_price) > 0 else 20 # Eğer price yoksa veya 0 ise varsayılan miktar
+        
+        if side.lower() == "long":
+            order_result = place_mexc_futures_order(trade_symbol, "long", quantity, price=None) # Piyasa emri için price=None
+            logger.info(f"[ORDER] Long sipariş başarıyla gönderildi: {order_result}")
+            return jsonify({"status": "success", "message": "Long sipariş gönderildi", "order": order_result}), 200
+        elif side.lower() == "short":
+            order_result = place_mexc_futures_order(trade_symbol, "short", quantity, price=None) # Piyasa emri için price=None
+            logger.info(f"[ORDER] Short sipariş başarıyla gönderildi: {order_result}")
+            return jsonify({"status": "success", "message": "Short sipariş gönderildi", "order": order_result}), 200
+        else:
+            return jsonify({"error": "Geçersiz side değeri"}), 400
+
+    except Exception as e:
+        logger.error(f"[WEBHOOK] İşlem hatası: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == "__main__":
     logger.info("Sunucu başlıyor...")
     sync_time_with_exchange()
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-
