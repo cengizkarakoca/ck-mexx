@@ -64,7 +64,7 @@ def webhook():
         side = data.get('side')
         entry_price = data.get('entry_price')
         if not all([coin, side, entry_price]):
-            msg = "Eksik veri: symbol, side veya entry_price yok"
+            msg = "Eksik veri: symbol veya side veya entry_price yok"
             logger.warning(msg + f" | data: {data}")
             return jsonify({'error': msg}), 400
         try:
@@ -74,10 +74,12 @@ def webhook():
             logger.warning(msg + f" | entry_price: {entry_price}")
             return jsonify({'error': msg}), 400
 
-        # Suffix temizle: örn "ETHUSDT.P" -> "ETHUSDT"
+        # Suffix temizle (örn ".P", ".PERP" varsa)
         coin_raw = coin.upper()
         if '.' in coin_raw:
             coin_raw = coin_raw.split('.')[0]
+        logger.info(f"Suffix temizlendikten sonra coin_raw: {coin_raw}")
+
         # Symbol parse: "ETHUSDT" -> "ETH/USDT"
         symbol = coin_raw
         if '/' not in symbol:
@@ -88,6 +90,7 @@ def webhook():
                 msg = f"Symbol formatı anlaşılmadı: {coin}"
                 logger.warning(msg)
                 return jsonify({'error': msg}), 400
+        logger.info(f"Parsed symbol string: {symbol}")
 
         # CCXT unified symbol arama
         unified_symbol = None
@@ -120,19 +123,22 @@ def webhook():
             logger.error(msg)
             return jsonify({'error': msg}), 500
         logger.info(f"USDT bakiyesi: {usdt_bal}")
-        if usdt_bal <= 0:
+        if usdt_bal is None or usdt_bal <= 0:
             msg = "Yetersiz bakiye"
             logger.warning(msg)
             return jsonify({'error': msg}), 400
 
-        # Leverage ayarı
+        # Pozisyon tarafı
+        is_long = side.strip().lower() == 'long'
+        # Leverage ayarı MEXC (openType, positionType parametreleri ile)
         try:
-            exchange.set_leverage(DEFAULT_LEVERAGE, unified_symbol)
-            logger.info(f"Leverage ayarlandı: {DEFAULT_LEVERAGE}x for {unified_symbol}")
+            params = {'openType': 1, 'positionType': 1 if is_long else 2}
+            exchange.set_leverage(DEFAULT_LEVERAGE, unified_symbol, params)
+            logger.info(f"Leverage ayarlandı: {DEFAULT_LEVERAGE}x for {unified_symbol} with {params}")
         except Exception as e:
             logger.warning(f"Leverage ayarlanamadı: {e}")
 
-        # Miktar hesaplama ve precision
+        # Miktar hesaplama
         qty = (usdt_bal * RISK_RATIO * DEFAULT_LEVERAGE) / entry_price
         try:
             qty = exchange.amount_to_precision(unified_symbol, qty)
@@ -140,15 +146,13 @@ def webhook():
         except Exception:
             qty = round(qty, 3)
         if float(qty) <= 0:
-            msg = "Qty sıfır veya negatif"
+            msg = f"Qty sıfır veya negatif (bakiye: {usdt_bal}, hesaplanan qty: {qty})"
             logger.warning(msg)
             return jsonify({'error': msg}), 400
         logger.info(f"Pozisyon miktarı (qty): {qty}")
 
-        is_long = side.strip().lower() == 'long'
-        order_side = 'buy' if is_long else 'sell'
-
         # Pozisyon açma (market)
+        order_side = 'buy' if is_long else 'sell'
         try:
             open_order = exchange.create_order(unified_symbol, 'market', order_side, qty, None, {'leverage': DEFAULT_LEVERAGE})
             logger.info(f"Pozisyon açıldı: {open_order}")
@@ -157,7 +161,7 @@ def webhook():
             logger.error(msg)
             return jsonify({'error': msg}), 500
 
-        # TP fiyatı %0.4
+        # TP işlemi
         tp_price = entry_price * (1.004 if is_long else 0.996)
         try:
             tp_price = exchange.price_to_precision(unified_symbol, tp_price)
@@ -165,13 +169,11 @@ def webhook():
             tp_price = round(tp_price, 2)
         logger.info(f"TP fiyatı belirlendi: {tp_price}")
 
-        # TP emri (reduceOnly)
         try:
             tp_order = exchange.create_order(unified_symbol, 'limit', 'sell' if is_long else 'buy', qty, tp_price, {'reduceOnly': True})
             logger.info(f"TP order kondu: {tp_order}")
         except Exception as e:
             logger.error(f"TP emri hatası: {e}")
-            # TP hatasında bile success dönebiliriz ya da bilgi verebiliriz
             tp_order = None
 
         return jsonify({
