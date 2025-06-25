@@ -93,25 +93,30 @@ def webhook():
                 return jsonify({'error': msg}), 400
         logger.info(f"Parsed symbol string: {symbol}")
 
-        # Unified symbol bulma: önce swap (perpetual), yoksa spot
+        # Unified symbol ve market_id bulma: önce swap (perpetual), yoksa spot
         base, quote = symbol.split('/')
         unified_symbol = None
+        market_id = None
+        # Swap piyasasında arama
         for m, market in exchange.markets.items():
             if market.get('type') == 'swap' and market.get('base') == base and market.get('quote') == quote:
                 unified_symbol = m
-                logger.info(f"Found swap market: {m}")
+                market_id = market.get('id')
+                logger.info(f"Found swap market: unified_symbol={m}, market_id={market_id}")
                 break
         if unified_symbol is None:
+            # Spot fallback
             for m, market in exchange.markets.items():
                 if market.get('type') == 'spot' and market.get('base') == base and market.get('quote') == quote:
                     unified_symbol = m
-                    logger.info(f"Swap bulunamadı, spot market kullanılıyor: {m}")
+                    market_id = market.get('id')
+                    logger.info(f"Swap bulunamadı, spot market kullanılıyor: unified_symbol={m}, market_id={market_id}")
                     break
-        if unified_symbol is None:
+        if unified_symbol is None or market_id is None:
             msg = f"Sembol bulunamadı: {symbol}"
             logger.warning(msg)
             return jsonify({'error': msg}), 400
-        logger.info(f"Unified symbol: {unified_symbol}")
+        logger.info(f"Unified symbol: {unified_symbol}, market_id: {market_id}")
 
         # Bakiye çekme (swap)
         usdt_bal = None
@@ -134,18 +139,26 @@ def webhook():
                 # info altındaki alana bak
                 info = balance.get('info')
                 logger.info(f"Balance info kısmı: {info}")
-                # Örnek: info['data']['availableMargin'] varsa:
+                # Örnek: info['data'][...] altındaki availableBalance veya availableCash kullan
+                # Aşağıda birkaç olası alanı kontrol ediyoruz:
                 available = None
-                try:
-                    available = balance.get('info', {}).get('data', {}).get('availableMargin')
-                    if available is not None:
-                        usdt_bal = float(available)
-                        logger.info(f"Balance info.data.availableMargin kullanıldı: {usdt_bal}")
-                    else:
-                        raise Exception("availableMargin yok")
-                except Exception as e2:
-                    logger.warning(f"Info’dan bakiye çekilemedi: {e2}")
-                    raise Exception("USDT bakiyesi bulunamadı")
+                # Eğer info yapısı list of dict:
+                if isinstance(info, dict) and isinstance(info.get('data'), list):
+                    for entry in info.get('data'):
+                        # entry e.g. {'currency':'USDT', 'availableBalance':'23.93', ...}
+                        if entry.get('currency') == 'USDT':
+                            # MEXC'de availableBalance alanı genelde doğru tutar
+                            val = entry.get('availableBalance') or entry.get('availableCash') or entry.get('availableOpen')
+                            if val is not None:
+                                try:
+                                    available = float(val)
+                                    logger.info(f"Balance info.data entry kullanıldı: available={available}")
+                                    usdt_bal = available
+                                except:
+                                    pass
+                            break
+                if usdt_bal is None:
+                    raise Exception("USDT bakiyesi bulunamadı info içinde")
         except Exception as e:
             msg = f"Bakiye alınamadı: {e}"
             logger.error(msg)
@@ -179,11 +192,12 @@ def webhook():
             return jsonify({'error': msg}), 400
         logger.info(f"Pozisyon miktarı (qty): {qty}")
 
-        # Pozisyon açma (market)
+        # Pozisyon açma (market) — burada market_id kullanılıyor
         order_side = 'buy' if is_long else 'sell'
         try:
-            open_order = exchange.create_order(unified_symbol, 'market', order_side, qty, None, {'leverage': DEFAULT_LEVERAGE})
-            logger.info(f"Pozisyon açıldı: {open_order}")
+            # market_id ile create_order
+            open_order = exchange.create_order(market_id, 'market', order_side, qty, None, {'leverage': DEFAULT_LEVERAGE})
+            logger.info(f"Pozisyon açıldı (market_id kullanılarak): {open_order}")
         except Exception as e:
             msg = f"Pozisyon açma hatası: {e}"
             logger.error(msg)
@@ -198,7 +212,8 @@ def webhook():
         logger.info(f"TP fiyatı belirlendi: {tp_price}")
 
         try:
-            tp_order = exchange.create_order(unified_symbol, 'limit', 'sell' if is_long else 'buy', qty, tp_price, {'reduceOnly': True})
+            # TP emri için yine market_id kullanabilirsiniz
+            tp_order = exchange.create_order(market_id, 'limit', 'sell' if is_long else 'buy', qty, tp_price, {'reduceOnly': True})
             logger.info(f"TP order kondu: {tp_order}")
         except Exception as e:
             logger.error(f"TP emri hatası: {e}")
@@ -207,6 +222,7 @@ def webhook():
         return jsonify({
             'status': 'success',
             'symbol': unified_symbol,
+            'market_id': market_id,
             'side': side,
             'qty': qty,
             'tp_price': tp_price,
