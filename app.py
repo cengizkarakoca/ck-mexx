@@ -13,20 +13,13 @@ from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 import ccxt
 
-# .env’den değişkenleri yükle
 load_dotenv()
-
-# Logging yapılandırması
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# Ortam değişkenleri
 MEXC_API_KEY = os.getenv("MEXC_API_KEY")
 MEXC_API_SECRET = os.getenv("MEXC_API_SECRET")
-USE_TESTNET = os.getenv("USE_TESTNET", "False").lower() in ("true", "1", "yes")
+USE_TESTNET = os.getenv("USE_TESTNET", "False").lower() in ("true","1","yes")
 try:
     RISK_RATIO = float(os.getenv("RISK_RATIO", "1.0"))
 except:
@@ -40,9 +33,7 @@ if not MEXC_API_KEY or not MEXC_API_SECRET:
     logger.error("MEXC_API_KEY veya MEXC_API_SECRET tanımlı değil.")
     raise RuntimeError("MEXC_API_KEY veya MEXC_API_SECRET tanımlı değil.")
 
-# Base URL: canlı veya testnet
 if USE_TESTNET:
-    # Dokümanınıza göre testnet URL’sini doğrulayın
     MEXC_REST_BASE = "https://contract.testnet.mexc.com"
     logger.info("Testnet modu: MEXC REST base testnet URL olarak ayarlandı.")
 else:
@@ -53,84 +44,53 @@ def get_timestamp_ms():
     return str(int(time.time() * 1000))
 
 def sign_request(params: dict) -> str:
-    """
-    HMAC SHA256 imzalama. Parametre dict’ini alfabetik sıraya göre birleştir ve imzala.
-    MEXC API dokümanına göre form-encoded veya JSON body kullanacaksanız ona göre urlencode yapıp imzayı üretin.
-    """
-    ordered_items = sorted(params.items(), key=lambda x: x[0])
-    # boş değerleri atarak birleştiriyoruz
-    query = "&".join(f"{k}={v}" for k, v in ordered_items if v != "")
-    signature = hmac.new(MEXC_API_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
-    return signature
+    ordered = sorted(params.items(), key=lambda x: x[0])
+    query = "&".join(f"{k}={v}" for k, v in ordered if v != "")
+    return hmac.new(MEXC_API_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
 
 def place_mexc_futures_order(symbol: str, side: str, quantity: float, price: float=None, leverage: int=DEFAULT_LEVERAGE):
-    """
-    MEXC futures/swap emir açma (market veya limit) direkt REST çağrısıyla.
-    - symbol: MEXC API’nin beklediği format, genelde "ETH_USDT" (CCXT market_id’den alınan string).
-    - side: "Long" veya "Short"
-    - quantity: pozisyon büyüklüğü (adet)
-    - price: None ise market order, değilse limit order price
-    - leverage: kaldıraç
-    """
     path = "/api/v1/private/order/submit"
     url = MEXC_REST_BASE + path
 
-    timestamp = get_timestamp_ms()
-    client_oid = str(uuid.uuid4())
     side_lower = side.strip().lower()
-    # Dokümanınıza göre side kodunu kontrol edin: örneğin 1=open long, 3=open short
-    if side_lower == "long":
-        side_param = 1
-    else:
-        side_param = 3
-    open_type = 1  # isolated; dokümana göre değiştirilebilir
-    position_type = 1 if side_lower == "long" else 2
-    # Order type: market vs limit; dokümana göre kod(örneğin 5=market,1=limit)
+    side_param = 1 if side_lower=="long" else 3
+    open_type = 1
+    position_type = 1 if side_lower=="long" else 2
     order_type = 5 if price is None else 1
 
-    params = {
-        "symbol": symbol,                      # örn "ETH_USDT"
-        "price": str(price) if price is not None else "",
-        "vol": str(quantity),
-        "side": side_param,
-        "openType": open_type,
-        "positionType": position_type,
-        "leverage": leverage,
-        "externalOid": client_oid,
-        "type": order_type,
-        "timestamp": timestamp,
-        "recvWindow": 5000,
-    }
-    params["sign"] = sign_request(params)
-
-    # Header: dokümana göre tam adı kullanın
-    # Örneğin:
     headers = {
-        "Content-Type": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
         "X-MEXC-APIKEY": MEXC_API_KEY,
     }
-    # Eğer doküman form-encoded gerektiriyorsa:
-    # headers = {
-    #     "Content-Type": "application/x-www-form-urlencoded",
-    #     "X-MEXC-APIKEY": MEXC_API_KEY,
-    # }
 
-    # Retry & timeout mantığı
     retries = 3
     backoff = 1
     for attempt in range(1, retries+1):
+        timestamp = get_timestamp_ms()
+        external_oid = str(uuid.uuid4())
+        params = {
+            "symbol": symbol,
+            "price": str(price) if price is not None else "",
+            "vol": str(quantity),
+            "side": side_param,
+            "openType": open_type,
+            "positionType": position_type,
+            "leverage": leverage,
+            "externalOid": external_oid,
+            "type": order_type,
+            "timestamp": timestamp,
+            "recvWindow": 5000,
+        }
+        params["sign"] = sign_request(params)
+        body = urlencode(params)
+
         try:
-            logger.info(f"MEXC REST order denemesi (attempt {attempt}): URL={url}, params={params}")
-            # JSON body kullanıyorsanız:
-            resp = requests.post(url, json=params, headers=headers, timeout=30)
-            # Eğer form-encoded body denenecekse:
-            # body = urlencode(params)
-            # resp = requests.post(url, data=body, headers=headers, timeout=30)
+            logger.info(f"MEXC REST order denemesi (attempt {attempt}): URL={url}, body={body}")
+            resp = requests.post(url, data=body, headers=headers, timeout=30)
             if resp.status_code != 200:
                 raise Exception(f"HTTP {resp.status_code}: {resp.text}")
             data = resp.json()
-            # Dokümana göre success kontrolü
-            if not data.get("success", False) and data.get("code") != "0":
+            if not data.get("success", False) and data.get("code") not in (0, "0"):
                 raise Exception(f"MEXC order hata: {data}")
             return data.get("data", data)
         except requests.exceptions.Timeout as te:
@@ -150,7 +110,6 @@ def place_mexc_futures_order(symbol: str, side: str, quantity: float, price: flo
             else:
                 raise
 
-# Flask app
 app = Flask(__name__)
 
 @app.route("/health", methods=["GET"])
@@ -177,22 +136,15 @@ def webhook():
             logger.warning(msg + f" | entry_price: {entry_price}")
             return jsonify({"error": msg}), 400
 
-        # Örn "ETHUSDT.P" -> "ETHUSDT"
         coin_raw = coin.upper().split(".")[0]
         logger.info(f"Suffix temizlendikten sonra coin_raw: {coin_raw}")
         if not coin_raw.endswith("USDT"):
             msg = f"Symbol formatı anlaşılmadı: {coin}"
             logger.warning(msg)
             return jsonify({"error": msg}), 400
-        base = coin_raw[:-4]
-        quote = "USDT"
+        base = coin_raw[:-4]; quote = "USDT"
 
-        # CCXT exchange örneği (balance ve precision/leverage için)
-        exchange = ccxt.mexc({
-            "apiKey": MEXC_API_KEY,
-            "secret": MEXC_API_SECRET,
-            "enableRateLimit": True,
-        })
+        exchange = ccxt.mexc({"apiKey": MEXC_API_KEY, "secret": MEXC_API_SECRET, "enableRateLimit": True})
         if USE_TESTNET:
             try:
                 exchange.set_sandbox_mode(True)
@@ -205,13 +157,11 @@ def webhook():
         except Exception as e:
             logger.warning(f"CCXT load_markets hatası: {e}")
 
-        # Swap market bulma
-        unified_symbol = None
-        market_id = None
+        unified_symbol = None; market_id = None
         for m, market in exchange.markets.items():
-            if market.get("type") == "swap" and market.get("base") == base and market.get("quote") == quote:
+            if market.get("type")=="swap" and market.get("base")==base and market.get("quote")==quote:
                 unified_symbol = m
-                market_id = market.get("id")  # örn "ETH_USDT"
+                market_id = market.get("id")  # "ETH_USDT" formatı
                 logger.info(f"Found swap market via CCXT: unified_symbol={m}, market_id={market_id}")
                 break
         if not market_id:
@@ -219,10 +169,19 @@ def webhook():
             logger.warning(msg)
             return jsonify({"error": msg}), 400
 
-        # Bakiye çekme
+        # Connectivity test (opsiyonel, debug için)
+        try:
+            ping = requests.get(MEXC_REST_BASE + "/api/v1/contract/ping", timeout=10)
+            logger.info(f"MEXC ping yanıt: {ping.status_code}, {ping.text}")
+        except Exception as e:
+            logger.warning(f"MEXC ping başarısız: {e}")
+            # Devam edebilirsiniz veya hata dönebilirsiniz:
+            # return jsonify({"error": f"Ping başarısız: {e}"}), 500
+
+        # Bakiye
         try:
             if exchange.has.get("swap"):
-                bal = exchange.fetch_balance({"type": "swap"})
+                bal = exchange.fetch_balance({"type":"swap"})
                 logger.info("fetch_balance({'type':'swap'}) kullanıldı.")
             else:
                 bal = exchange.fetch_balance()
@@ -234,7 +193,7 @@ def webhook():
                 info = bal.get("info", {})
                 if isinstance(info, dict) and isinstance(info.get("data"), list):
                     for entry in info.get("data"):
-                        if entry.get("currency") == "USDT":
+                        if entry.get("currency")=="USDT":
                             val = entry.get("availableBalance") or entry.get("availableCash") or None
                             if val is not None:
                                 usdt_bal = float(val)
@@ -249,8 +208,7 @@ def webhook():
             return jsonify({"error": msg}), 500
         logger.info(f"USDT bakiyesi: {usdt_bal}")
 
-        # Leverage ayarı (isteğe bağlı, CCXT ile)
-        is_long = side.strip().lower() == "long"
+        is_long = side.strip().lower()=="long"
         try:
             params_lever = {"openType": 1, "positionType": 1 if is_long else 2}
             exchange.set_leverage(DEFAULT_LEVERAGE, unified_symbol, params_lever)
@@ -258,7 +216,6 @@ def webhook():
         except Exception as e:
             logger.warning(f"Leverage ayarlanamadı CCXT ile: {e}")
 
-        # Qty hesaplama
         qty = (usdt_bal * RISK_RATIO * DEFAULT_LEVERAGE) / entry_price
         if qty <= 0:
             msg = f"Qty hesaplama sıfır veya negatif: {qty}"
@@ -270,15 +227,9 @@ def webhook():
             qty = round(qty, 3)
         logger.info(f"Pozisyon qty: {qty}")
 
-        # Market order açma (REST)
+        # Market order açma
         try:
-            open_resp = place_mexc_futures_order(
-                symbol=market_id,
-                side=side,
-                quantity=qty,
-                price=None,
-                leverage=DEFAULT_LEVERAGE,
-            )
+            open_resp = place_mexc_futures_order(symbol=market_id, side=side, quantity=qty, price=None, leverage=DEFAULT_LEVERAGE)
             logger.info(f"Pozisyon açıldı (REST): {open_resp}")
         except Exception as e:
             msg = f"Pozisyon açma REST hatası: {e}"
@@ -295,13 +246,7 @@ def webhook():
 
         tp_resp = None
         try:
-            tp_resp = place_mexc_futures_order(
-                symbol=market_id,
-                side="Short" if is_long else "Long",
-                quantity=qty,
-                price=tp_price,
-                leverage=DEFAULT_LEVERAGE,
-            )
+            tp_resp = place_mexc_futures_order(symbol=market_id, side=("Short" if is_long else "Long"), quantity=qty, price=tp_price, leverage=DEFAULT_LEVERAGE)
             logger.info(f"TP emri kondu (REST): {tp_resp}")
         except Exception as e:
             logger.error(f"TP emri REST hatası: {e}")
