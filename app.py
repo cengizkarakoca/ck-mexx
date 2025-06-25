@@ -55,7 +55,7 @@ def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAUL
     side_param = 1 if side.lower() == "long" else 3
     open_type = 1
     position_type = 1 if side.lower() == "long" else 2
-    order_type = 5 if price is None else 1
+    order_type = 5 if price is None else 1 # 5 for market order, 1 for limit order
 
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -68,7 +68,7 @@ def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAUL
             external_oid = str(uuid.uuid4())
             params = {
                 "symbol": symbol,
-                "price": str(price or ""),
+                "price": str(price or ""), # Set price to empty string for market orders
                 "vol": str(quantity),
                 "side": side_param,
                 "openType": open_type,
@@ -77,13 +77,13 @@ def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAUL
                 "externalOid": external_oid,
                 "type": order_type,
                 "timestamp": timestamp,
-                "recvWindow": 5000
+                "recvWindow": 20000 # Increased from 5000ms to 20000ms (20 seconds)
             }
             params["sign"] = sign_request(params)
             body = urlencode(params)
 
             logger.info(f"[ORDER] Deneme {attempt}: {body}")
-            response = requests.post(url, data=body, headers=headers, timeout=15)
+            response = requests.post(url, data=body, headers=headers, timeout=30) # Increased from 15s to 30s
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}: {response.text}")
             data = response.json()
@@ -137,36 +137,39 @@ def mexc_webhook():
         if not symbol or not side:
             return jsonify({"error": "Eksik parametreler: symbol veya side"}), 400
 
-        # Miktar hesaplamasını kendi stratejinize göre ayarlayın.
-        # Örneğin, 10 USDT değerinde bir işlem için:
-        # Not: MEXC'de semboller genelde USDT ile bitiyor (örn: BTCUSDT).
-        # TradingView'den sadece "BTC" gelirse, "USDT" eklemeniz gerekebilir.
         trade_symbol = symbol + "USDT" # Assuming the symbol from TradingView is e.g., "XRP"
-        
-        # Basit bir örnek: Sabit 10 USDT'lik işlem değeri.
-        # Bunu kendi risk yönetiminize göre değiştirin.
-        # Örneğin, bakiyenizin %x'i kadar işlem yapmak için balance endpoint'ini kullanabilirsiniz.
-        trade_amount_usd = 10 # İşlem yapılacak USDT miktarı
 
-        # Eğer piyasa emri verilecekse (price=None), miktarı USD değeri üzerinden hesaplamak gerekir.
-        # quantity = trade_amount_usd / current_price_of_symbol (ancak current_price_of_symbol'u çekmeniz gerekir)
-        # Şimdilik, entry_price'ı kullanarak bir tahmin yapalım, ancak piyasa emrinde bu çok kritik değil.
+        # --- DİKKAT: Miktar Hesaplama Kısmı ---
+        # Burası sizin risk yönetiminize göre ayarlanması gereken en kritik kısımdır.
+        # Sabit bir USDT değeri üzerinden işlem yapmak yerine, bakiyenize veya riskinize göre hesaplama yapmalısınız.
+
+        trade_amount_usd = 10 # Örnek: Sabit 10 USDT değerinde bir işlem
+
+        # Eğer piyasa emri veriyorsak (price=None), quantity olarak doğrudan almak istediğimiz coin miktarını vermeliyiz.
+        # Bu miktarı, o anki piyasa fiyatını çekerek trade_amount_usd'ye bölebiliriz.
+        # Basitlik adına, şu an için entry_price'ı kullanarak yaklaşık bir hesaplama yapıyoruz.
+        # CANLI İŞLEM İÇİN, buraya CCXT ile güncel piyasa fiyatını çeken bir mekanizma eklemeniz şiddetle tavsiye edilir.
         
-        # Piyasa emri (order_type=5) veriyorsak, quantity olarak doğrudan almak istediğimiz coin miktarını vermemiz gerekir.
-        # Eğer trade_amount_usd kadar işlem yapmak istiyorsak, o anki piyasa fiyatını çekmeliyiz.
-        # Bu basitlik adına, quantity'i sabit bir sayı olarak ya da entry_price üzerinden yaklaşık hesaplayalım.
+        # Örneğin, aşağıdaki gibi güncel fiyatı çekebilirsiniz (ccxt import edilmişti):
+        # try:
+        #     exchange = ccxt.mexc({
+        #         "apiKey": MEXC_API_KEY,
+        #         "secret": MEXC_API_SECRET,
+        #         "enableRateLimit": True
+        #     })
+        #     if USE_TESTNET:
+        #         exchange.set_sandbox_mode(True)
+        #     ticker = exchange.fetch_ticker(trade_symbol)
+        #     current_price = ticker['last']
+        #     quantity = trade_amount_usd / current_price
+        # except Exception as e:
+        #     logger.error(f"Fiyat çekme hatası: {e}")
+        #     quantity = 20 # Hata durumunda varsayılan miktar
         
-        # Daha güvenli bir miktar hesaplaması için, ccxt ile güncel fiyatı çekebilirsiniz:
-        # exchange = ccxt.mexc(...)
-        # if USE_TESTNET: exchange.set_sandbox_mode(True)
-        # ticker = exchange.fetch_ticker(trade_symbol)
-        # current_price = ticker['last']
-        # quantity = trade_amount_usd / current_price
-        
-        # Geçici olarak, 10 USDT'lik bir işlem için fiyatı 0.50 olarak varsayarak bir miktar atayalım.
-        # Burası kendi miktar yönetimi stratejinize göre ayarlanmalıdır.
+        # Mevcut kodda, giriş fiyatını kullanarak basit bir tahmin yapıyoruz:
         quantity = trade_amount_usd / float(entry_price) if entry_price and float(entry_price) > 0 else 20 # Eğer price yoksa veya 0 ise varsayılan miktar
-        
+        # ------------------------------------
+
         if side.lower() == "long":
             order_result = place_mexc_futures_order(trade_symbol, "long", quantity, price=None) # Piyasa emri için price=None
             logger.info(f"[ORDER] Long sipariş başarıyla gönderildi: {order_result}")
