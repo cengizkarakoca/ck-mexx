@@ -97,7 +97,6 @@ def webhook():
         base, quote = symbol.split('/')
         unified_symbol = None
         market_id = None
-        # Swap piyasasında arama
         for m, market in exchange.markets.items():
             if market.get('type') == 'swap' and market.get('base') == base and market.get('quote') == quote:
                 unified_symbol = m
@@ -105,7 +104,6 @@ def webhook():
                 logger.info(f"Found swap market: unified_symbol={m}, market_id={market_id}")
                 break
         if unified_symbol is None:
-            # Spot fallback
             for m, market in exchange.markets.items():
                 if market.get('type') == 'spot' and market.get('base') == base and market.get('quote') == quote:
                     unified_symbol = m
@@ -127,33 +125,24 @@ def webhook():
             else:
                 balance = exchange.fetch_balance()
                 logger.info("fetch_balance fallback kullanıldı.")
-            # Tüm balance objesini logla, iç yapıyı incele:
             logger.info(f"Balance raw: {balance}")
-            # İlk deneme: free veya total içinden USDT al
             if 'free' in balance and 'USDT' in balance['free']:
                 usdt_bal = float(balance['free']['USDT'])
             elif 'total' in balance and 'USDT' in balance['total']:
                 usdt_bal = float(balance['total']['USDT'])
             else:
                 logger.warning(f"Balance objesinde USDT bulunamadı: free keys={list(balance.get('free',{}).keys())}, total keys={list(balance.get('total',{}).keys())}")
-                # info altındaki alana bak
                 info = balance.get('info')
                 logger.info(f"Balance info kısmı: {info}")
-                # Örnek: info['data'][...] altındaki availableBalance veya availableCash kullan
-                # Aşağıda birkaç olası alanı kontrol ediyoruz:
-                available = None
-                # Eğer info yapısı list of dict:
+                # info['data'] listesinde USDT entry arama
                 if isinstance(info, dict) and isinstance(info.get('data'), list):
                     for entry in info.get('data'):
-                        # entry e.g. {'currency':'USDT', 'availableBalance':'23.93', ...}
                         if entry.get('currency') == 'USDT':
-                            # MEXC'de availableBalance alanı genelde doğru tutar
                             val = entry.get('availableBalance') or entry.get('availableCash') or entry.get('availableOpen')
                             if val is not None:
                                 try:
-                                    available = float(val)
-                                    logger.info(f"Balance info.data entry kullanıldı: available={available}")
-                                    usdt_bal = available
+                                    usdt_bal = float(val)
+                                    logger.info(f"Balance info.data entry kullanıldı: available={usdt_bal}")
                                 except:
                                     pass
                             break
@@ -192,10 +181,9 @@ def webhook():
             return jsonify({'error': msg}), 400
         logger.info(f"Pozisyon miktarı (qty): {qty}")
 
-        # Pozisyon açma (market) — burada market_id kullanılıyor
+        # Pozisyon açma (market) — mutlaka market_id kullanılıyor
         order_side = 'buy' if is_long else 'sell'
         try:
-            # market_id ile create_order
             open_order = exchange.create_order(market_id, 'market', order_side, qty, None, {'leverage': DEFAULT_LEVERAGE})
             logger.info(f"Pozisyon açıldı (market_id kullanılarak): {open_order}")
         except Exception as e:
@@ -212,7 +200,6 @@ def webhook():
         logger.info(f"TP fiyatı belirlendi: {tp_price}")
 
         try:
-            # TP emri için yine market_id kullanabilirsiniz
             tp_order = exchange.create_order(market_id, 'limit', 'sell' if is_long else 'buy', qty, tp_price, {'reduceOnly': True})
             logger.info(f"TP order kondu: {tp_order}")
         except Exception as e:
