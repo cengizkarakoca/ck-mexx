@@ -122,13 +122,30 @@ def webhook():
             else:
                 balance = exchange.fetch_balance()
                 logger.info("fetch_balance fallback kullanıldı.")
+            # Tüm balance objesini logla, iç yapıyı incele:
+            logger.info(f"Balance raw: {balance}")
+            # İlk deneme: free veya total içinden USDT al
             if 'free' in balance and 'USDT' in balance['free']:
                 usdt_bal = float(balance['free']['USDT'])
             elif 'total' in balance and 'USDT' in balance['total']:
                 usdt_bal = float(balance['total']['USDT'])
             else:
                 logger.warning(f"Balance objesinde USDT bulunamadı: free keys={list(balance.get('free',{}).keys())}, total keys={list(balance.get('total',{}).keys())}")
-                raise Exception("USDT bakiyesi bulunamadı")
+                # info altındaki alana bak
+                info = balance.get('info')
+                logger.info(f"Balance info kısmı: {info}")
+                # Örnek: info['data']['availableMargin'] varsa:
+                available = None
+                try:
+                    available = balance.get('info', {}).get('data', {}).get('availableMargin')
+                    if available is not None:
+                        usdt_bal = float(available)
+                        logger.info(f"Balance info.data.availableMargin kullanıldı: {usdt_bal}")
+                    else:
+                        raise Exception("availableMargin yok")
+                except Exception as e2:
+                    logger.warning(f"Info’dan bakiye çekilemedi: {e2}")
+                    raise Exception("USDT bakiyesi bulunamadı")
         except Exception as e:
             msg = f"Bakiye alınamadı: {e}"
             logger.error(msg)
@@ -207,6 +224,6 @@ def health():
     return "OK", 200
 
 if __name__ == '__main__':
-    logger.info("Sunucu başlatiliyor")
+    logger.info("Sunucu başlatılıyor")
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
