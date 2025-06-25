@@ -34,18 +34,17 @@ if not API_KEY or not API_SECRET:
 
 # CCXT exchange oluşturma
 exchange_config = {'apiKey': API_KEY, 'secret': API_SECRET, 'enableRateLimit': True}
+exchange = ccxt.mexc(exchange_config)
 if USE_TESTNET:
-    exchange = ccxt.mexc(exchange_config)
     try:
         exchange.set_sandbox_mode(True)
         logger.info("MEXC testnet modu etkin.")
     except Exception as e:
         logger.warning(f"Testnet modu ayarlanamadı: {e}")
 else:
-    exchange = ccxt.mexc(exchange_config)
     logger.info("MEXC gerçek modda çalışacak.")
 
-# load_markets ve has loglama
+# Markets ve özellikleri logla
 try:
     exchange.load_markets()
     logger.info(f"CCXT markets yüklendi, sembol sayısı: {len(exchange.symbols)}")
@@ -94,53 +93,47 @@ def webhook():
                 return jsonify({'error': msg}), 400
         logger.info(f"Parsed symbol string: {symbol}")
 
-        # Futures (swap) unified symbol bulma
+        # Unified symbol bulma: önce swap (perpetual), yoksa spot
         base, quote = symbol.split('/')
         unified_symbol = None
-        # Önce spot aramayacağız, doğrudan swap pazarında arıyoruz:
         for m, market in exchange.markets.items():
-            # market['type'] genellikle 'swap' ise futures/perpetual
             if market.get('type') == 'swap' and market.get('base') == base and market.get('quote') == quote:
                 unified_symbol = m
                 logger.info(f"Found swap market: {m}")
                 break
         if unified_symbol is None:
-            # Eğer swap bulunamazsa fallback spot arama
             for m, market in exchange.markets.items():
-                if market.get('type') in ('spot',) and market.get('base') == base and market.get('quote') == quote:
+                if market.get('type') == 'spot' and market.get('base') == base and market.get('quote') == quote:
                     unified_symbol = m
-                    logger.info(f"Swap market bulunamadı, spot market kullanılıyor: {m}")
+                    logger.info(f"Swap bulunamadı, spot market kullanılıyor: {m}")
                     break
         if unified_symbol is None:
-            msg = f"Sembol bulunamadı: {symbol} (swap veya spot)"
+            msg = f"Sembol bulunamadı: {symbol}"
             logger.warning(msg)
             return jsonify({'error': msg}), 400
-        logger.info(f"Unified symbol seçildi: {unified_symbol}")
+        logger.info(f"Unified symbol: {unified_symbol}")
 
-        # Bakiye çekme: futures hesabı
+        # Bakiye çekme (swap)
         usdt_bal = None
         try:
-            if 'future' in exchange.has and exchange.has['future']:
-                balance = exchange.fetch_balance({'type':'future'})
-                logger.info("fetch_balance({'type':'future'}) kullanıldı.")
+            if exchange.has.get('swap'):
+                balance = exchange.fetch_balance({'type':'swap'})
+                logger.info("fetch_balance({'type':'swap'}) kullanıldı.")
             else:
-                # Bazı CCXT adaptörlerinde futures fetch farklı olabilir; yine de deneyelim
-                balance = exchange.fetch_balance({'type':'linear'}) if 'linear' in exchange.has and exchange.has['linear'] else exchange.fetch_balance()
-                logger.info("fetch_balance fallback olarak spot veya linear kullanıldı.")
-            # Balance içinde USDT futures bakiyesi
+                balance = exchange.fetch_balance()
+                logger.info("fetch_balance fallback kullanıldı.")
             if 'free' in balance and 'USDT' in balance['free']:
                 usdt_bal = float(balance['free']['USDT'])
             elif 'total' in balance and 'USDT' in balance['total']:
                 usdt_bal = float(balance['total']['USDT'])
             else:
-                # Bazı durumlarda farklı anahtar olabilir
-                logger.warning(f"Balance objesinde USDT bulunamadı: keys free={list(balance.get('free',{}).keys())}, total={list(balance.get('total',{}).keys())}")
+                logger.warning(f"Balance objesinde USDT bulunamadı: free keys={list(balance.get('free',{}).keys())}, total keys={list(balance.get('total',{}).keys())}")
                 raise Exception("USDT bakiyesi bulunamadı")
         except Exception as e:
             msg = f"Bakiye alınamadı: {e}"
             logger.error(msg)
             return jsonify({'error': msg}), 500
-        logger.info(f"USDT bakiyesi (futures): {usdt_bal}")
+        logger.info(f"USDT bakiyesi (swap): {usdt_bal}")
         if usdt_bal is None or usdt_bal <= 0:
             msg = f"Yetersiz bakiye: {usdt_bal}"
             logger.warning(msg)
@@ -214,6 +207,6 @@ def health():
     return "OK", 200
 
 if __name__ == '__main__':
-    logger.info("Sunucu başlatılıyor")
+    logger.info("Sunucu başlatiliyor")
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
