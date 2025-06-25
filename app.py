@@ -1,4 +1,5 @@
 # app.py
+
 import os
 import time
 import hmac
@@ -7,13 +8,15 @@ import uuid
 import traceback
 import logging
 import requests
+from urllib.parse import urlencode
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+import ccxt
 
-# .env dosyasından API_KEY, API_SECRET, vs. okunur
+# .env’den değişkenleri yükle
 load_dotenv()
 
-# Logging yapılandırma
+# Logging yapılandırması
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -39,123 +42,113 @@ if not MEXC_API_KEY or not MEXC_API_SECRET:
 
 # Base URL: canlı veya testnet
 if USE_TESTNET:
-    # Dokümanınıza göre testnet base URL’i kontrol edin:
-    MEXC_REST_BASE = "https://contract.testnet.mexc.com"  # örnek; dokümanınıza göre değiştirin
-    logger.info("Testnet modu: MEXC REST base set to testnet URL.")
+    # Dokümanınıza göre testnet URL’sini doğrulayın
+    MEXC_REST_BASE = "https://contract.testnet.mexc.com"
+    logger.info("Testnet modu: MEXC REST base testnet URL olarak ayarlandı.")
 else:
     MEXC_REST_BASE = "https://contract.mexc.com"
-    logger.info("Gerçek modda: MEXC REST base set to live URL.")
+    logger.info("Gerçek modda: MEXC REST base live URL olarak ayarlandı.")
 
-# Zaman damgası ms
 def get_timestamp_ms():
     return str(int(time.time() * 1000))
 
-# İmzalama (HMAC SHA256). Parametre dict’i alfabetik sırayla birleştirip HMAC SHA256 ile sign üretilir.
 def sign_request(params: dict) -> str:
-    # Parametreleri alfabetik sıraya göre birleştir:
+    """
+    HMAC SHA256 imzalama. Parametre dict’ini alfabetik sıraya göre birleştir ve imzala.
+    MEXC API dokümanına göre form-encoded veya JSON body kullanacaksanız ona göre urlencode yapıp imzayı üretin.
+    """
     ordered_items = sorted(params.items(), key=lambda x: x[0])
+    # boş değerleri atarak birleştiriyoruz
     query = "&".join(f"{k}={v}" for k, v in ordered_items if v != "")
-    # HMAC SHA256
-    secret = MEXC_API_SECRET.encode()
-    signature = hmac.new(secret, query.encode(), hashlib.sha256).hexdigest()
+    signature = hmac.new(MEXC_API_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
     return signature
 
-# MEXC futures (swap) emir açma fonksiyonu
-def place_mexc_futures_order(
-    symbol: str,
-    side: str,
-    quantity: float,
-    price: float = None,
-    leverage: int = DEFAULT_LEVERAGE,
-):
+def place_mexc_futures_order(symbol: str, side: str, quantity: float, price: float=None, leverage: int=DEFAULT_LEVERAGE):
     """
-    MEXC futures/swap emir açma (market veya limit) direkt REST.
-    - symbol: MEXC API’nin beklediği format, genelde "ETH_USDT" gibi CCXT market_id’den alınan string.
+    MEXC futures/swap emir açma (market veya limit) direkt REST çağrısıyla.
+    - symbol: MEXC API’nin beklediği format, genelde "ETH_USDT" (CCXT market_id’den alınan string).
     - side: "Long" veya "Short"
-    - quantity: pozisyon büyüklüğü (adet). MEXC API’de vol parametresi.
-    - price: None ise market order, değilse limit order price.
-    - leverage: Kaldıraç
+    - quantity: pozisyon büyüklüğü (adet)
+    - price: None ise market order, değilse limit order price
+    - leverage: kaldıraç
     """
-    # Endpoint path: dokümanınıza göre: tek emir oluşturma endpoint’i
     path = "/api/v1/private/order/submit"
     url = MEXC_REST_BASE + path
 
-    # Zaman damgası
     timestamp = get_timestamp_ms()
-
-    # MEXC API parametreleri: dokümanınıza göre param adlarını kesinleştirin.
-    # Aşağıda yaygın örnek parametre adlandırması kullanıldı:
-    #   symbol: "ETH_USDT"
-    #   price: limit price; market order için price="" veya omitted
-    #   vol: quantity
-    #   leverage: kaldıraç
-    #   side: 1=open long, 3=open short  (doküman kontrolü: bazen 2/4 close vs. farklı)
-    #   openType: 1=isolated (dokümanınıza göre)
-    #   positionType: 1=long,2=short? Bazı API’lerde side zaten belirtiyor, burada dokümanınıza göre side parametre ile birlikte kullanın.
-    #   externalOid: benzersiz ID (UUID)
-    #   timestamp, recvWindow
-    #   type/orderType: 5=market, 1=limit  (bazı MEXC sürümlerinde)
     client_oid = str(uuid.uuid4())
-
-    # side_param dokümanınıza göre:
-    # Örnek: 1=open long, 3=open short
     side_lower = side.strip().lower()
+    # Dokümanınıza göre side kodunu kontrol edin: örneğin 1=open long, 3=open short
     if side_lower == "long":
-        side_param = 1  # open long
-    elif side_lower == "short":
-        side_param = 3  # open short; dokümanın close paramlarıyla karışmamasına dikkat edin
+        side_param = 1
     else:
-        raise ValueError(f"Unknown side: {side}")
+        side_param = 3
+    open_type = 1  # isolated; dokümana göre değiştirilebilir
+    position_type = 1 if side_lower == "long" else 2
+    # Order type: market vs limit; dokümana göre kod(örneğin 5=market,1=limit)
+    order_type = 5 if price is None else 1
 
-    # openType ve positionType: dokümanınıza göre
-    open_type = 1       # örnek: 1=isolated
-    position_type = 1 if side_lower == "long" else 2  # bazen API’da 1=long,2=short; doküman kontrol edin
-
-    # type/orderType: market vs limit
-    # Dokümanınıza göre market order type kodu genelde 5; limit 1.
-    if price is None:
-        order_type = 5  # market order
-    else:
-        order_type = 1  # limit order
-
-    # Parametre dict
     params = {
         "symbol": symbol,                      # örn "ETH_USDT"
-        "price": str(price) if price is not None else "",  # market için boş string
-        "vol": str(quantity),                  # miktar
-        "side": side_param,                    # int
-        "openType": open_type,                 # int
-        "positionType": position_type,         # int
-        "leverage": leverage,                  # int
-        "externalOid": client_oid,             # benzersiz
-        "type": order_type,                    # int
+        "price": str(price) if price is not None else "",
+        "vol": str(quantity),
+        "side": side_param,
+        "openType": open_type,
+        "positionType": position_type,
+        "leverage": leverage,
+        "externalOid": client_oid,
+        "type": order_type,
         "timestamp": timestamp,
         "recvWindow": 5000,
     }
-    # İmzayı ekle
-    signature = sign_request(params)
-    params["sign"] = signature
+    params["sign"] = sign_request(params)
 
-    # Header: dokümandaki isim
+    # Header: dokümana göre tam adı kullanın
+    # Örneğin:
     headers = {
         "Content-Type": "application/json",
-        "X-MEXC-APIKEY": MEXC_API_KEY,  # veya dokümanda “ApiKey”/“apiKey” geçiyorsa ona göre değiştirin
+        "X-MEXC-APIKEY": MEXC_API_KEY,
     }
+    # Eğer doküman form-encoded gerektiriyorsa:
+    # headers = {
+    #     "Content-Type": "application/x-www-form-urlencoded",
+    #     "X-MEXC-APIKEY": MEXC_API_KEY,
+    # }
 
-    # İstek JSON body
-    body = params
-
-    logger.info(f"Sending MEXC futures order REST: URL={url}, body={body}")
-    resp = requests.post(url, json=body, headers=headers, timeout=10)
-    if resp.status_code != 200:
-        raise Exception(f"MEXC order API HTTP {resp.status_code}: {resp.text}")
-    data = resp.json()
-    # Örnek response: {"success":true,"code":"0","data":{...}} veya {"success":false,...}
-    # Dokümanınıza göre success alanı veya code=="0" kontrol edin
-    if not data.get("success", False) and data.get("code") != "0":
-        raise Exception(f"MEXC order hata: {data}")
-    # Başarılı yanıt data kısmı
-    return data.get("data", data)
+    # Retry & timeout mantığı
+    retries = 3
+    backoff = 1
+    for attempt in range(1, retries+1):
+        try:
+            logger.info(f"MEXC REST order denemesi (attempt {attempt}): URL={url}, params={params}")
+            # JSON body kullanıyorsanız:
+            resp = requests.post(url, json=params, headers=headers, timeout=30)
+            # Eğer form-encoded body denenecekse:
+            # body = urlencode(params)
+            # resp = requests.post(url, data=body, headers=headers, timeout=30)
+            if resp.status_code != 200:
+                raise Exception(f"HTTP {resp.status_code}: {resp.text}")
+            data = resp.json()
+            # Dokümana göre success kontrolü
+            if not data.get("success", False) and data.get("code") != "0":
+                raise Exception(f"MEXC order hata: {data}")
+            return data.get("data", data)
+        except requests.exceptions.Timeout as te:
+            logger.warning(f"Timeout oldu MEXC REST order (attempt {attempt}): {te}")
+            if attempt < retries:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            else:
+                raise
+        except Exception as e:
+            logger.warning(f"MEXC REST order hatası (attempt {attempt}): {e}")
+            if attempt < retries:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            else:
+                raise
 
 # Flask app
 app = Flask(__name__)
@@ -184,23 +177,17 @@ def webhook():
             logger.warning(msg + f" | entry_price: {entry_price}")
             return jsonify({"error": msg}), 400
 
-        # Suffix temizle, örn "ETHUSDT.P" -> "ETHUSDT"
+        # Örn "ETHUSDT.P" -> "ETHUSDT"
         coin_raw = coin.upper().split(".")[0]
         logger.info(f"Suffix temizlendikten sonra coin_raw: {coin_raw}")
-
-        # Symbol parse: "ETHUSDT" -> base="ETH", quote="USDT"
-        if coin_raw.endswith("USDT"):
-            base = coin_raw[:-4]
-            quote = "USDT"
-        else:
+        if not coin_raw.endswith("USDT"):
             msg = f"Symbol formatı anlaşılmadı: {coin}"
             logger.warning(msg)
             return jsonify({"error": msg}), 400
+        base = coin_raw[:-4]
+        quote = "USDT"
 
-        # CCXT ile market bilgisi yüklüyse market_id tespit edilebilir; eğer CCXT’yi artık sadece balance/leverage için kullanıyorsanız:
-        # Burada CCXT fetch_balance ve set_leverage kullanmak istiyorsanız exchange.load_markets() öncesi CCXT exchange örneği oluşturmalısınız.
-        # Aşağıda örnek CCXT balance çekme ve leverage ayar yapılıyor. Eğer CCXT’i bütünüyle bırakmak isterseniz, balance ve leverage REST ile de yapılabilir.
-        import ccxt
+        # CCXT exchange örneği (balance ve precision/leverage için)
         exchange = ccxt.mexc({
             "apiKey": MEXC_API_KEY,
             "secret": MEXC_API_SECRET,
@@ -211,15 +198,14 @@ def webhook():
                 exchange.set_sandbox_mode(True)
                 logger.info("CCXT testnet modu etkin.")
             except Exception as e:
-                logger.warning(f"CCXT testnet set hatası: {e}")
-        # Markets yükle (bir kez startup’ta yapılabilir, buraya koymak redeploy performansını etkiler ama örnek basitliği için ekleniyor)
+                logger.warning(f"CCXT sandbox hatası: {e}")
         try:
             exchange.load_markets()
             logger.info("CCXT markets yüklendi.")
         except Exception as e:
             logger.warning(f"CCXT load_markets hatası: {e}")
 
-        # Swap market_id bulma: CCXT market listesinde type='swap', base ve quote eşleşen
+        # Swap market bulma
         unified_symbol = None
         market_id = None
         for m, market in exchange.markets.items():
@@ -233,7 +219,7 @@ def webhook():
             logger.warning(msg)
             return jsonify({"error": msg}), 400
 
-        # Balance çekme CCXT ile
+        # Bakiye çekme
         try:
             if exchange.has.get("swap"):
                 bal = exchange.fetch_balance({"type": "swap"})
@@ -241,12 +227,10 @@ def webhook():
             else:
                 bal = exchange.fetch_balance()
                 logger.info("fetch_balance fallback kullanıldı.")
-            logger.info(f"Balance raw: {bal}")
             usdt_bal = None
             if "free" in bal and "USDT" in bal["free"]:
                 usdt_bal = float(bal["free"]["USDT"])
             else:
-                # info içindeki availableBalance
                 info = bal.get("info", {})
                 if isinstance(info, dict) and isinstance(info.get("data"), list):
                     for entry in info.get("data"):
@@ -254,7 +238,6 @@ def webhook():
                             val = entry.get("availableBalance") or entry.get("availableCash") or None
                             if val is not None:
                                 usdt_bal = float(val)
-                                logger.info(f"Balance info.data entry kullanıldı: available={usdt_bal}")
                             break
             if usdt_bal is None or usdt_bal <= 0:
                 msg = f"Yetersiz bakiye: {usdt_bal}"
@@ -266,11 +249,11 @@ def webhook():
             return jsonify({"error": msg}), 500
         logger.info(f"USDT bakiyesi: {usdt_bal}")
 
-        # Leverage ayarı CCXT ile
+        # Leverage ayarı (isteğe bağlı, CCXT ile)
         is_long = side.strip().lower() == "long"
         try:
-            params = {"openType": 1, "positionType": 1 if is_long else 2}
-            exchange.set_leverage(DEFAULT_LEVERAGE, unified_symbol, params)
+            params_lever = {"openType": 1, "positionType": 1 if is_long else 2}
+            exchange.set_leverage(DEFAULT_LEVERAGE, unified_symbol, params_lever)
             logger.info(f"Leverage ayarlandı CCXT ile: {DEFAULT_LEVERAGE}x")
         except Exception as e:
             logger.warning(f"Leverage ayarlanamadı CCXT ile: {e}")
@@ -278,7 +261,7 @@ def webhook():
         # Qty hesaplama
         qty = (usdt_bal * RISK_RATIO * DEFAULT_LEVERAGE) / entry_price
         if qty <= 0:
-            msg = f"Qty hesaplama sıfır: {qty}"
+            msg = f"Qty hesaplama sıfır veya negatif: {qty}"
             logger.warning(msg)
             return jsonify({"error": msg}), 400
         try:
@@ -288,13 +271,12 @@ def webhook():
         logger.info(f"Pozisyon qty: {qty}")
 
         # Market order açma (REST)
-        # price=None -> market, değilse limit
         try:
             open_resp = place_mexc_futures_order(
                 symbol=market_id,
                 side=side,
                 quantity=qty,
-                price=None,  # market order
+                price=None,
                 leverage=DEFAULT_LEVERAGE,
             )
             logger.info(f"Pozisyon açıldı (REST): {open_resp}")
@@ -303,10 +285,9 @@ def webhook():
             logger.error(msg)
             return jsonify({"error": msg}), 500
 
-        # TP emri: limit order
+        # TP emri (limit)
         tp_price = entry_price * (1.004 if is_long else 0.996)
         try:
-            # CCXT price precision ile formatlayın
             tp_price = exchange.price_to_precision(unified_symbol, tp_price)
         except:
             tp_price = round(tp_price, 2)
@@ -321,20 +302,17 @@ def webhook():
                 price=tp_price,
                 leverage=DEFAULT_LEVERAGE,
             )
-            logger.info(f"TP order kondu (REST): {tp_resp}")
+            logger.info(f"TP emri kondu (REST): {tp_resp}")
         except Exception as e:
-            # TP emri hata verse de pozisyon açık olabilir; loglayın
             logger.error(f"TP emri REST hatası: {e}")
 
-        return jsonify(
-            {
-                "status": "success",
-                "market_id": market_id,
-                "qty": qty,
-                "open_order": open_resp,
-                "tp_order": tp_resp,
-            }
-        ), 200
+        return jsonify({
+            "status": "success",
+            "market_id": market_id,
+            "qty": qty,
+            "open_order": open_resp,
+            "tp_order": tp_resp,
+        }), 200
 
     except Exception as e:
         trace = traceback.format_exc()
