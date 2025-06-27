@@ -21,17 +21,19 @@ def normalize_symbol(symbol, exchange):
     symbol = symbol.upper()
     exchange.load_markets()
     symbols = exchange.symbols
-    logger.info(f"Exchange sembolleri örnekleri: {symbols[:10]}")
 
-    combined1 = symbol + "USDT"
-    combined2 = symbol + "_USDT"
+    test_order = [
+        symbol + "USDT",      # LINKUSDT
+        symbol + "USD",       # LINKUSD
+        symbol + "_USDT"      # LINK_USDT
+    ]
 
-    if combined1 in symbols:
-        return combined1
-    elif combined2 in symbols:
-        return combined2
-    else:
-        raise ValueError(f"Sembol borsada bulunamadı: {combined1} veya {combined2}")
+    for s in test_order:
+        if s in symbols:
+            logger.info(f"[SYMBOL] Kullanılan sembol: {s}")
+            return s
+
+    raise ValueError(f"[SYMBOL] Sembol bulunamadı: {test_order}")
 
 def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAULT_LEVERAGE):
     exchange = ccxt.mexc({
@@ -47,7 +49,7 @@ def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAUL
 
     try:
         exchange.set_leverage(leverage, symbol, {
-            "openType": 1,  # izole margin
+            "openType": 1,
             "positionType": 1 if side.lower() == "long" else 2
         })
 
@@ -106,8 +108,6 @@ def mexc_webhook():
             trade_symbol = normalize_symbol(symbol, exchange)
         except ValueError as ve:
             return jsonify({"error": str(ve)}), 400
-        except Exception as ex:
-            return jsonify({"error": f"Sembol doğrulama hatası: {str(ex)}"}), 400
 
         balance = exchange.fetch_balance({"type": "swap"})
         usdt_balance = balance['free'].get('USDT', 0)
@@ -122,7 +122,10 @@ def mexc_webhook():
         quantity = (usdt_balance * DEFAULT_LEVERAGE) / current_price
         MIN_ORDER_QUANTITY = 1.0
         if quantity < MIN_ORDER_QUANTITY:
-            return jsonify({"status": "failed", "message": f"Minimum emir miktarının altında ({quantity:.6f} < {MIN_ORDER_QUANTITY})"}), 400
+            return jsonify({
+                "status": "failed",
+                "message": f"Minimum emir miktarının altında ({quantity:.6f} < {MIN_ORDER_QUANTITY})"
+            }), 400
 
         quantity = float(f"{quantity:.6f}")
 
