@@ -11,7 +11,6 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# Ortam değişkenleri
 MEXC_API_KEY = os.getenv("MEXC_API_KEY")
 MEXC_API_SECRET = os.getenv("MEXC_API_SECRET")
 USE_TESTNET = os.getenv("USE_TESTNET", "False").lower() in ("true", "1", "yes")
@@ -21,7 +20,6 @@ if not MEXC_API_KEY or not MEXC_API_SECRET:
     raise RuntimeError("MEXC_API_KEY veya MEXC_API_SECRET eksik")
 
 def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAULT_LEVERAGE):
-    """MEXC vadeli işlemler piyasasında emir gönderir (CCXT ile)."""
     exchange = ccxt.mexc({
         "apiKey": MEXC_API_KEY,
         "secret": MEXC_API_SECRET,
@@ -31,9 +29,8 @@ def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAUL
         exchange.set_sandbox_mode(True)
 
     try:
-        # openType: 1 = isolated, positionType: 1 = long, 2 = short
         exchange.set_leverage(leverage, symbol, {
-            "openType": 1,
+            "openType": 1,  # isolated margin
             "positionType": 1 if side.lower() == "long" else 2
         })
 
@@ -74,7 +71,8 @@ def mexc_webhook():
         if not symbol or not side:
             return jsonify({"error": "Eksik parametreler: symbol veya side"}), 400
 
-        trade_symbol = symbol.upper() + "USDT"
+        # ✅ Artık sembol doğrudan kullanılacak, arkasına 'USDT' eklenmeyecek
+        trade_symbol = symbol.upper()
 
         exchange = ccxt.mexc({
             "apiKey": MEXC_API_KEY,
@@ -84,25 +82,15 @@ def mexc_webhook():
         if USE_TESTNET:
             exchange.set_sandbox_mode(True)
 
-        usdt_balance = 0
-        try:
-            bal = exchange.fetch_balance({"type": "swap"})
-            usdt_balance = bal['free'].get('USDT', 0)
-            logger.info(f"[BAKIYE] USDT Vadeli Bakiye: {usdt_balance}")
-        except Exception as e:
-            logger.error(f"[BAKIYE] Bakiye hatası: {e}")
-            return jsonify({"error": "Bakiye çekilemedi: " + str(e)}), 500
+        bal = exchange.fetch_balance({"type": "swap"})
+        usdt_balance = bal['free'].get('USDT', 0)
+        logger.info(f"[BAKIYE] USDT Vadeli Bakiye: {usdt_balance}")
 
         if usdt_balance <= 0:
             return jsonify({"status": "failed", "message": "Yeterli bakiye yok"}), 400
 
-        current_price = 0
-        try:
-            ticker = exchange.fetch_ticker(trade_symbol)
-            current_price = ticker['last']
-        except Exception as e:
-            logger.error(f"[FİYAT] Fiyat çekilemedi: {e}")
-            return jsonify({"error": f"Fiyat alınamadı: {e}"}), 500
+        ticker = exchange.fetch_ticker(trade_symbol)
+        current_price = ticker['last']
 
         quantity = (usdt_balance * DEFAULT_LEVERAGE) / current_price
         MIN_ORDER_QUANTITY = 1.0
@@ -118,7 +106,7 @@ def mexc_webhook():
             result = place_mexc_futures_order(trade_symbol, "short", quantity, price=None)
             return jsonify({"status": "success", "message": "Short emir gönderildi", "order": result}), 200
         else:
-            return jsonify({"error": "Geçersiz taraf (side)"}), 400
+            return jsonify({"error": "Geçersiz side"}), 400
 
     except Exception as e:
         logger.error(f"[WEBHOOK] Hata: {e}\n{traceback.format_exc()}")
