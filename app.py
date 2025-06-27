@@ -1,6 +1,4 @@
 import os
-import time
-import uuid
 import traceback
 import logging
 from flask import Flask, request, jsonify
@@ -20,15 +18,11 @@ if not MEXC_API_KEY or not MEXC_API_SECRET:
     raise RuntimeError("MEXC_API_KEY veya MEXC_API_SECRET eksik")
 
 def normalize_symbol(symbol, exchange):
-    """
-    Gelen sembolü MEXC Futures formatına çevirir.
-    Örnek: LINK -> LINK_USDT
-    Eğer sembol zaten _USDT ile bitiyorsa dokunmaz.
-    """
     symbol = symbol.upper()
     if not symbol.endswith("_USDT"):
         symbol = symbol + "_USDT"
-    # Eğer sembol borsada yoksa hata fırlat
+    if exchange.symbols is None:
+        raise RuntimeError("exchange.symbols boş, load_markets çağrılmamış olabilir")
     if symbol not in exchange.symbols:
         raise ValueError(f"Sembol borsada bulunamadı: {symbol}")
     return symbol
@@ -42,11 +36,13 @@ def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAUL
     if USE_TESTNET:
         exchange.set_sandbox_mode(True)
 
-    # Sembolü normalleştir ve doğrula
+    # Piyasa bilgisi yüklensin
+    exchange.load_markets()
+
+    # Sembol doğrulaması
     symbol = normalize_symbol(symbol, exchange)
 
     try:
-        # Kaldıraç ayarla
         exchange.set_leverage(leverage, symbol, {
             "openType": 1,  # izole margin
             "positionType": 1 if side.lower() == "long" else 2
@@ -61,11 +57,12 @@ def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAUL
             side=side_value,
             amount=quantity,
             price=price,
-            params={"type": "swap"}  # vadeli işlem
+            params={"type": "swap"}
         )
 
         logger.info(f"[CCXT ORDER] Emir başarıyla gönderildi: {order}")
         return order
+
     except Exception as e:
         logger.error(f"[CCXT ORDER] Emir gönderilirken hata oluştu: {e}")
         raise RuntimeError(f"Emir gönderilemedi: {str(e)}")
@@ -79,12 +76,16 @@ def health():
 @app.route("/webhook", methods=["POST"])
 def mexc_webhook():
     try:
-        data = request.get_json()
+        # JSON parse denemesi ve yoksa hata döndürme
+        data = request.get_json(force=True, silent=False)
+        if not data:
+            return jsonify({"error": "Geçersiz veya boş JSON"}), 400
+
         logger.info(f"[WEBHOOK] Gelen veri: {data}")
 
         symbol = data.get("symbol")
         side = data.get("side")
-        entry_price = data.get("entry_price")
+        entry_price = data.get("entry_price")  # kullanmıyoruz ama kayıt için alıyoruz
 
         if not symbol or not side:
             return jsonify({"error": "Eksik parametreler: symbol veya side"}), 400
@@ -97,11 +98,15 @@ def mexc_webhook():
         if USE_TESTNET:
             exchange.set_sandbox_mode(True)
 
-        # Sembol normalizasyonu ve validasyonu
+        # Piyasa bilgisi önceden yüklü olmalı, aksi halde normalize_symbol hata verir
+        exchange.load_markets()
+
         try:
             trade_symbol = normalize_symbol(symbol, exchange)
         except ValueError as ve:
             return jsonify({"error": str(ve)}), 400
+        except Exception as ex:
+            return jsonify({"error": f"Sembol doğrulama hatası: {str(ex)}"}), 400
 
         balance = exchange.fetch_balance({"type": "swap"})
         usdt_balance = balance['free'].get('USDT', 0)
@@ -127,7 +132,7 @@ def mexc_webhook():
             result = place_mexc_futures_order(trade_symbol, "short", quantity, price=None)
             return jsonify({"status": "success", "message": "Short emir gönderildi", "order": result}), 200
         else:
-            return jsonify({"error": "Geçersiz side"}), 400
+            return jsonify({"error": "Geçersiz side parametresi"}), 400
 
     except Exception as e:
         logger.error(f"[WEBHOOK] Hata: {e}\n{traceback.format_exc()}")
