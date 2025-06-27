@@ -20,20 +20,21 @@ if not MEXC_API_KEY or not MEXC_API_SECRET:
 def normalize_symbol(symbol, exchange):
     symbol = symbol.upper()
     exchange.load_markets()
-    symbols = exchange.symbols
 
-    test_order = [
-        symbol + "USDT",      # LINKUSDT
-        symbol + "USD",       # LINKUSD
-        symbol + "_USDT"      # LINK_USDT
+    swap_symbols = [
+        s for s in exchange.symbols
+        if exchange.market(s).get('type') == 'swap'
     ]
+    logger.info(f"[DEBUG] {len(swap_symbols)} swap sembol bulundu.")
 
-    for s in test_order:
-        if s in symbols:
+    candidates = [symbol + "USDT", symbol + "USD", symbol + "_USDT"]
+
+    for s in candidates:
+        if s in swap_symbols:
             logger.info(f"[SYMBOL] Kullanılan sembol: {s}")
             return s
 
-    raise ValueError(f"[SYMBOL] Sembol bulunamadı: {test_order}")
+    raise ValueError(f"[SYMBOL] Sembol bulunamadı: {candidates}")
 
 def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAULT_LEVERAGE):
     exchange = ccxt.mexc({
