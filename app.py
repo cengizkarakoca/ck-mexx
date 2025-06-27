@@ -27,12 +27,22 @@ def normalize_symbol(symbol, exchange):
     ]
     logger.info(f"[DEBUG] {len(swap_symbols)} swap sembol bulundu.")
 
-    candidates = [symbol + "USDT", symbol + "USD", symbol + "_USDT"]
+    candidates = [
+        symbol + "USDT",
+        symbol + "USD",
+        symbol + "_USDT",
+        symbol + "/USDT:USDT",
+        symbol + "/USDT:SWAP",
+        symbol + "/USDT",
+        symbol + "_USDT:USDT",
+        symbol + "_USDT:SWAP"
+    ]
 
-    for s in candidates:
-        if s in swap_symbols:
-            logger.info(f"[SYMBOL] Kullanılan sembol: {s}")
-            return s
+    matches = [s for s in candidates if s in swap_symbols]
+    logger.info(f"[MATCHES] Denenen semboller: {candidates}")
+    if matches:
+        logger.info(f"[SYMBOL] Kullanılan sembol: {matches[0]}")
+        return matches[0]
 
     raise ValueError(f"[SYMBOL] Sembol bulunamadı: {candidates}")
 
@@ -46,10 +56,10 @@ def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAUL
         exchange.set_sandbox_mode(True)
 
     exchange.load_markets()
-    symbol = normalize_symbol(symbol, exchange)
+    normalized_symbol = normalize_symbol(symbol, exchange)
 
     try:
-        exchange.set_leverage(leverage, symbol, {
+        exchange.set_leverage(leverage, normalized_symbol, {
             "openType": 1,
             "positionType": 1 if side.lower() == "long" else 2
         })
@@ -58,7 +68,7 @@ def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAUL
         side_value = 'buy' if side.lower() == 'long' else 'sell'
 
         order = exchange.create_order(
-            symbol=symbol,
+            symbol=normalized_symbol,
             type=order_type,
             side=side_value,
             amount=quantity,
@@ -130,14 +140,8 @@ def mexc_webhook():
 
         quantity = float(f"{quantity:.6f}")
 
-        if side.lower() == "long":
-            result = place_mexc_futures_order(trade_symbol, "long", quantity, price=None)
-            return jsonify({"status": "success", "message": "Long emir gönderildi", "order": result}), 200
-        elif side.lower() == "short":
-            result = place_mexc_futures_order(trade_symbol, "short", quantity, price=None)
-            return jsonify({"status": "success", "message": "Short emir gönderildi", "order": result}), 200
-        else:
-            return jsonify({"error": "Geçersiz side parametresi"}), 400
+        result = place_mexc_futures_order(trade_symbol, side.lower(), quantity, price=None)
+        return jsonify({"status": "success", "message": f"{side} emir gönderildi", "order": result}), 200
 
     except Exception as e:
         logger.error(f"[WEBHOOK] Hata: {e}\n{traceback.format_exc()}")
