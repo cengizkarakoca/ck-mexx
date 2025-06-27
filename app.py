@@ -1,7 +1,5 @@
 import os
 import time
-import hmac
-import hashlib
 import uuid
 import traceback
 import logging
@@ -22,24 +20,6 @@ DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "25"))
 if not MEXC_API_KEY or not MEXC_API_SECRET:
     raise RuntimeError("MEXC_API_KEY veya MEXC_API_SECRET eksik")
 
-MEXC_REST_BASE = "https://contract.testnet.mexc.com" if USE_TESTNET else "https://contract.mexc.com"
-server_time_delta_ms = 0
-
-def sync_time_with_exchange():
-    global server_time_delta_ms
-    try:
-        resp = ccxt.mexc().public_get_contract_ping()
-        if resp:
-            server_time = int(resp["data"])
-            local_time = int(time.time() * 1000)
-            server_time_delta_ms = server_time - local_time
-            logger.info(f"[SENKRON] MEXC zaman farkı: {server_time_delta_ms} ms")
-    except Exception as e:
-        logger.warning(f"[SENKRON] Zaman senkronizasyonu başarısız: {e}")
-
-def get_timestamp_ms():
-    return str(int(time.time() * 1000) + server_time_delta_ms)
-
 def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAULT_LEVERAGE):
     """MEXC vadeli işlemler piyasasında emir gönderir (CCXT ile)."""
     exchange = ccxt.mexc({
@@ -51,7 +31,12 @@ def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAUL
         exchange.set_sandbox_mode(True)
 
     try:
-        exchange.set_leverage(leverage, symbol)
+        # openType: 1 = isolated, positionType: 1 = long, 2 = short
+        exchange.set_leverage(leverage, symbol, {
+            "openType": 1,
+            "positionType": 1 if side.lower() == "long" else 2
+        })
+
         order_type = 'market' if price is None else 'limit'
         side_value = 'buy' if side.lower() == 'long' else 'sell'
 
@@ -99,8 +84,6 @@ def mexc_webhook():
         if USE_TESTNET:
             exchange.set_sandbox_mode(True)
 
-        sync_time_with_exchange()
-
         usdt_balance = 0
         try:
             bal = exchange.fetch_balance({"type": "swap"})
@@ -128,8 +111,6 @@ def mexc_webhook():
 
         quantity = float(f"{quantity:.6f}")
 
-        sync_time_with_exchange()
-
         if side.lower() == "long":
             result = place_mexc_futures_order(trade_symbol, "long", quantity, price=None)
             return jsonify({"status": "success", "message": "Long emir gönderildi", "order": result}), 200
@@ -145,6 +126,5 @@ def mexc_webhook():
 
 if __name__ == "__main__":
     logger.info("Sunucu başlıyor...")
-    sync_time_with_exchange()
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
