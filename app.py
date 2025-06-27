@@ -46,18 +46,7 @@ def normalize_symbol(symbol, exchange):
 
     raise ValueError(f"[SYMBOL] Sembol bulunamadı: {candidates}")
 
-def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAULT_LEVERAGE):
-    exchange = ccxt.mexc({
-        "apiKey": MEXC_API_KEY,
-        "secret": MEXC_API_SECRET,
-        "enableRateLimit": True,
-    })
-    if USE_TESTNET:
-        exchange.set_sandbox_mode(True)
-
-    exchange.load_markets()
-    normalized_symbol = normalize_symbol(symbol, exchange)
-
+def place_mexc_futures_order(exchange, normalized_symbol, side, quantity, price=None, leverage=DEFAULT_LEVERAGE):
     try:
         exchange.set_leverage(leverage, normalized_symbol, {
             "openType": 1,
@@ -116,7 +105,7 @@ def mexc_webhook():
         exchange.load_markets()
 
         try:
-            trade_symbol = normalize_symbol(symbol, exchange)
+            normalized_symbol = normalize_symbol(symbol, exchange)
         except ValueError as ve:
             return jsonify({"error": str(ve)}), 400
 
@@ -127,7 +116,7 @@ def mexc_webhook():
         if usdt_balance <= 0:
             return jsonify({"status": "failed", "message": "Yeterli bakiye yok"}), 400
 
-        ticker = exchange.fetch_ticker(trade_symbol)
+        ticker = exchange.fetch_ticker(normalized_symbol)
         current_price = ticker['last']
 
         quantity = (usdt_balance * DEFAULT_LEVERAGE) / current_price
@@ -140,7 +129,7 @@ def mexc_webhook():
 
         quantity = float(f"{quantity:.6f}")
 
-        result = place_mexc_futures_order(trade_symbol, side.lower(), quantity, price=None)
+        result = place_mexc_futures_order(exchange, normalized_symbol, side.lower(), quantity, price=None)
         return jsonify({"status": "success", "message": f"{side} emir gönderildi", "order": result}), 200
 
     except Exception as e:
