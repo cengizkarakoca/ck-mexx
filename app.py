@@ -19,13 +19,19 @@ if not MEXC_API_KEY or not MEXC_API_SECRET:
 
 def normalize_symbol(symbol, exchange):
     symbol = symbol.upper()
-    if not symbol.endswith("_USDT"):
-        symbol = symbol + "_USDT"
-    if exchange.symbols is None:
-        raise RuntimeError("exchange.symbols boş, load_markets çağrılmamış olabilir")
-    if symbol not in exchange.symbols:
-        raise ValueError(f"Sembol borsada bulunamadı: {symbol}")
-    return symbol
+    exchange.load_markets()
+    symbols = exchange.symbols
+    logger.info(f"Exchange sembolleri örnekleri: {symbols[:10]}")
+
+    combined1 = symbol + "USDT"
+    combined2 = symbol + "_USDT"
+
+    if combined1 in symbols:
+        return combined1
+    elif combined2 in symbols:
+        return combined2
+    else:
+        raise ValueError(f"Sembol borsada bulunamadı: {combined1} veya {combined2}")
 
 def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAULT_LEVERAGE):
     exchange = ccxt.mexc({
@@ -36,10 +42,7 @@ def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAUL
     if USE_TESTNET:
         exchange.set_sandbox_mode(True)
 
-    # Piyasa bilgisi yüklensin
     exchange.load_markets()
-
-    # Sembol doğrulaması
     symbol = normalize_symbol(symbol, exchange)
 
     try:
@@ -76,8 +79,7 @@ def health():
 @app.route("/webhook", methods=["POST"])
 def mexc_webhook():
     try:
-        # JSON parse denemesi ve yoksa hata döndürme
-        data = request.get_json(force=True, silent=False)
+        data = request.get_json(force=True)
         if not data:
             return jsonify({"error": "Geçersiz veya boş JSON"}), 400
 
@@ -85,7 +87,7 @@ def mexc_webhook():
 
         symbol = data.get("symbol")
         side = data.get("side")
-        entry_price = data.get("entry_price")  # kullanmıyoruz ama kayıt için alıyoruz
+        entry_price = data.get("entry_price")
 
         if not symbol or not side:
             return jsonify({"error": "Eksik parametreler: symbol veya side"}), 400
@@ -98,7 +100,6 @@ def mexc_webhook():
         if USE_TESTNET:
             exchange.set_sandbox_mode(True)
 
-        # Piyasa bilgisi önceden yüklü olmalı, aksi halde normalize_symbol hata verir
         exchange.load_markets()
 
         try:
