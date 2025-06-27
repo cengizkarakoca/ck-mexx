@@ -19,18 +19,36 @@ DEFAULT_LEVERAGE = int(os.getenv("LEVERAGE", "25"))
 if not MEXC_API_KEY or not MEXC_API_SECRET:
     raise RuntimeError("MEXC_API_KEY veya MEXC_API_SECRET eksik")
 
+def normalize_symbol(symbol, exchange):
+    """
+    Gelen sembolü MEXC Futures formatına çevirir.
+    Örnek: LINK -> LINK_USDT
+    Eğer sembol zaten _USDT ile bitiyorsa dokunmaz.
+    """
+    symbol = symbol.upper()
+    if not symbol.endswith("_USDT"):
+        symbol = symbol + "_USDT"
+    # Eğer sembol borsada yoksa hata fırlat
+    if symbol not in exchange.symbols:
+        raise ValueError(f"Sembol borsada bulunamadı: {symbol}")
+    return symbol
+
 def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAULT_LEVERAGE):
     exchange = ccxt.mexc({
         "apiKey": MEXC_API_KEY,
         "secret": MEXC_API_SECRET,
-        "enableRateLimit": True
+        "enableRateLimit": True,
     })
     if USE_TESTNET:
         exchange.set_sandbox_mode(True)
 
+    # Sembolü normalleştir ve doğrula
+    symbol = normalize_symbol(symbol, exchange)
+
     try:
+        # Kaldıraç ayarla
         exchange.set_leverage(leverage, symbol, {
-            "openType": 1,  # isolated margin
+            "openType": 1,  # izole margin
             "positionType": 1 if side.lower() == "long" else 2
         })
 
@@ -43,7 +61,7 @@ def place_mexc_futures_order(symbol, side, quantity, price=None, leverage=DEFAUL
             side=side_value,
             amount=quantity,
             price=price,
-            params={"type": "swap"}
+            params={"type": "swap"}  # vadeli işlem
         )
 
         logger.info(f"[CCXT ORDER] Emir başarıyla gönderildi: {order}")
@@ -71,19 +89,22 @@ def mexc_webhook():
         if not symbol or not side:
             return jsonify({"error": "Eksik parametreler: symbol veya side"}), 400
 
-        # ✅ Artık sembol doğrudan kullanılacak, arkasına 'USDT' eklenmeyecek
-        trade_symbol = symbol.upper()
-
         exchange = ccxt.mexc({
             "apiKey": MEXC_API_KEY,
             "secret": MEXC_API_SECRET,
-            "enableRateLimit": True
+            "enableRateLimit": True,
         })
         if USE_TESTNET:
             exchange.set_sandbox_mode(True)
 
-        bal = exchange.fetch_balance({"type": "swap"})
-        usdt_balance = bal['free'].get('USDT', 0)
+        # Sembol normalizasyonu ve validasyonu
+        try:
+            trade_symbol = normalize_symbol(symbol, exchange)
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
+        balance = exchange.fetch_balance({"type": "swap"})
+        usdt_balance = balance['free'].get('USDT', 0)
         logger.info(f"[BAKIYE] USDT Vadeli Bakiye: {usdt_balance}")
 
         if usdt_balance <= 0:
@@ -95,7 +116,7 @@ def mexc_webhook():
         quantity = (usdt_balance * DEFAULT_LEVERAGE) / current_price
         MIN_ORDER_QUANTITY = 1.0
         if quantity < MIN_ORDER_QUANTITY:
-            return jsonify({"status": "failed", "message": f"Minimum emir miktarının altında ({quantity} < {MIN_ORDER_QUANTITY})"}), 400
+            return jsonify({"status": "failed", "message": f"Minimum emir miktarının altında ({quantity:.6f} < {MIN_ORDER_QUANTITY})"}), 400
 
         quantity = float(f"{quantity:.6f}")
 
